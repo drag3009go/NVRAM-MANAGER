@@ -36,6 +36,5 @@ Explore the core functionality of the manager:
 
 ## 🚀 Getting Started
 
-1. Clone or download this repository.
-2. Ensure you have administrator privileges (required for NVRAM access).
-3. Run the application from the `dist/` folder.
+1. download release.
+2. Run the application
