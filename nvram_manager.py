@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import ctypes
 from ctypes import wintypes
 import sys
@@ -9,6 +9,9 @@ import binascii
 import subprocess
 import shutil
 import string
+
+EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
+ERROR_ENVVAR_NOT_FOUND = 203
 
 def is_admin():
     try:
@@ -208,8 +211,6 @@ def parse_boot_option(data):
     return description, full_path
 
 def get_all_variables():
-    EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
-
     known_names = [
         "BootOrder", "BootCurrent", "Timeout", "SecureBoot",
         "SetupMode", "PlatformLang", "Lang", "VendorKeys",
@@ -222,8 +223,9 @@ def get_all_variables():
     for name in known_names:
         data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
         if data is None:
-            if err not in (2, 0):
-                variables.append((name, "", f"<Ошибка {err}>", ""))
+            if err in (2, ERROR_ENVVAR_NOT_FOUND):
+                continue
+            variables.append((name, "", f"<Error {err}>", ""))
             continue
 
         hex_value = binascii.hexlify(data).decode('ascii').upper()
@@ -245,12 +247,10 @@ def get_all_variables():
     return variables
 
 def delete_boot_entry(name):
-    EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
     success, err = write_uefi_var(name, EFI_GLOBAL_GUID, None)
     return success, err
 
 def update_boot_order(order_list):
-    EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
     data = bytearray()
     for name in order_list:
         num = int(name[4:8], 16)
@@ -259,7 +259,6 @@ def update_boot_order(order_list):
     return success, err
 
 def update_boot_description(name, new_description):
-    EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
     data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
     if data is None:
         return False, err
@@ -299,7 +298,7 @@ def mount_efi_partition(drive_letter):
         if result.returncode != 0:
             return False, result.stderr
         if not os.path.exists(f"{drive_letter}:\\EFI"):
-            return False, "Папка EFI не найдена после монтирования."
+            return False, "EFI folder not found after mounting."
         return True, None
     except Exception as e:
         return False, str(e)
@@ -325,21 +324,21 @@ def get_embedded_file_path(filename):
 def restore_boot_files():
     drive_letter = get_free_drive_letter()
     if not drive_letter:
-        return "Нет свободных букв для монтирования EFI-раздела."
+        return "No free drive letter available for mounting EFI partition."
 
     ok, err = mount_efi_partition(drive_letter)
     if not ok:
-        return f"Не удалось смонтировать EFI-раздел: {err}"
+        return f"Failed to mount EFI partition: {err}"
 
     esp_root = f"{drive_letter}:"
     try:
         if not os.path.exists(f"{esp_root}\\EFI"):
-            return f"После монтирования не найдена папка {esp_root}\\EFI."
+            return f"EFI folder not found at {esp_root}\\EFI after mounting."
 
         bootmgfw_src = get_embedded_file_path('bootmgfw.efi')
         bootx64_src = get_embedded_file_path('bootx64.efi')
         if not bootmgfw_src:
-            return "Файл bootmgfw.efi не найден во встроенных ресурсах EXE."
+            return "bootmgfw.efi not found in embedded resources."
         if not bootx64_src:
             bootx64_src = bootmgfw_src
 
@@ -361,14 +360,13 @@ def restore_boot_files():
         dst1 = os.path.join(dest_microsoft, 'bootmgfw.efi')
         ok1, err1 = safe_replace(bootmgfw_src, dst1)
         if not ok1:
-            return f"Ошибка замены bootmgfw.efi: {err1}"
+            return f"Error replacing bootmgfw.efi: {err1}"
 
         dst2 = os.path.join(dest_boot, 'bootx64.efi')
         ok2, err2 = safe_replace(bootx64_src, dst2)
         if not ok2:
-            return f"Ошибка замены bootx64.efi: {err2}"
+            return f"Error replacing bootx64.efi: {err2}"
 
-        EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
         found = False
         for i in range(0x0000, 0x0200):
             name = f"Boot{i:04X}"
@@ -380,33 +378,150 @@ def restore_boot_files():
                     break
 
         if found:
-            return (f"Файлы заменены на встроенные на диске {esp_root}.\n"
-                    "Запись Windows Boot Manager найдена. Рекомендуется перезагрузить компьютер.")
+            return (f"Files replaced on {esp_root}.\n"
+                    "Windows Boot Manager entry found. Please reboot.")
 
         windows_drive = os.environ.get('SystemDrive', 'C:')
         cmd = f'bcdboot {windows_drive}\\Windows /s {esp_root} /f UEFI'
         try:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
-                return f"Файлы заменены, запись создана с помощью bcdboot."
+                return f"Files replaced, boot entry created via bcdboot."
             else:
                 manual = (
-                    f"Файлы bootmgfw.efi и bootx64.efi успешно заменены.\n"
-                    f"Не удалось автоматически создать загрузочную запись.\n"
-                    f"Для завершения восстановления выполните вручную:\n"
+                    f"bootmgfw.efi and bootx64.efi successfully replaced.\n"
+                    f"Could not automatically create boot entry.\n"
+                    f"To complete recovery manually run:\n"
                     f"   bcdboot {windows_drive}\\Windows /s {esp_root} /f UEFI"
                 )
                 return manual
         except Exception as e:
-            return f"Ошибка при выполнении bcdboot: {e}\n\nФайлы заменены, но запись не создана."
+            return f"Error running bcdboot: {e}\n\nFiles replaced but boot entry not created."
 
     finally:
         unmount_efi_partition(drive_letter)
 
+def find_free_boot_number():
+    for i in range(0x0000, 0x0200):
+        name = f"Boot{i:04X}"
+        data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
+        if data is None and (err == 2 or err == ERROR_ENVVAR_NOT_FOUND):
+            return name
+    for i in range(0x0200, 0x10000):
+        name = f"Boot{i:04X}"
+        data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
+        if data is None and (err == 2 or err == ERROR_ENVVAR_NOT_FOUND):
+            return name
+    return None
+
+def create_boot_entry(description, file_path_hex):
+    try:
+        file_path_bytes = bytes.fromhex(file_path_hex)
+    except ValueError:
+        return False, "Invalid hex format"
+
+    attributes = 0x00000001
+    file_path_len = len(file_path_bytes)
+    desc_utf16 = description.encode('utf-16-le') + b'\x00\x00'
+
+    new_data = struct.pack('<I', attributes)
+    new_data += struct.pack('<H', file_path_len)
+    new_data += desc_utf16
+    new_data += file_path_bytes
+
+    boot_name = find_free_boot_number()
+    if boot_name is None:
+        return False, "No free Boot numbers found (checked up to 0xFFFF)."
+
+    success, err = write_uefi_var(boot_name, EFI_GLOBAL_GUID, new_data)
+    if success:
+        return True, (boot_name, err)
+    return False, err
+
+def update_boot_path(name, new_file_path_hex):
+    data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
+    if data is None:
+        return False, err
+    if len(data) < 6:
+        return False, -1
+
+    attributes = struct.unpack_from('<I', data, 0)[0]
+
+    pos = 6
+    while pos + 1 < len(data):
+        if data[pos] == 0 and data[pos+1] == 0:
+            pos += 2
+            break
+        pos += 2
+
+    try:
+        new_path_bytes = bytes.fromhex(new_file_path_hex)
+    except ValueError:
+        return False, "Invalid hex format"
+
+    new_file_path_len = len(new_path_bytes)
+    new_data = struct.pack('<I', attributes)
+    new_data += struct.pack('<H', new_file_path_len)
+    desc_data = data[6:pos]
+    new_data += desc_data
+    new_data += new_path_bytes
+
+    success, err = write_uefi_var(name, EFI_GLOBAL_GUID, new_data)
+    return success, err
+
+def extract_file_path_hex(data):
+    if len(data) < 6:
+        return None
+    file_path_len = struct.unpack_from('<H', data, 4)[0]
+    pos = 6
+    while pos + 1 < len(data):
+        if data[pos] == 0 and data[pos+1] == 0:
+            pos += 2
+            break
+        pos += 2
+    file_path_bytes = data[pos:pos+file_path_len]
+    return file_path_bytes.hex().upper()
+
+def add_to_boot_order(boot_name):
+    data, _ = read_uefi_var("BootOrder", EFI_GLOBAL_GUID)
+    if data is None:
+        num = int(boot_name[4:8], 16)
+        new_order = struct.pack('<H', num)
+        return write_uefi_var("BootOrder", EFI_GLOBAL_GUID, new_order)
+    else:
+        current_order = []
+        for i in range(0, len(data), 2):
+            num = struct.unpack_from('<H', data, i)[0]
+            current_order.append(f"Boot{num:04X}")
+        if boot_name in current_order:
+            return True, 0
+        num = int(boot_name[4:8], 16)
+        new_order = data + struct.pack('<H', num)
+        return write_uefi_var("BootOrder", EFI_GLOBAL_GUID, new_order)
+
+def path_to_utf16le_hex(file_path):
+    if not file_path.startswith('\\'):
+        file_path = '\\' + file_path
+    utf16_bytes = file_path.encode('utf-16-le') + b'\x00\x00'
+    return utf16_bytes.hex().upper()
+
+def get_relative_efi_path(file_path):
+    drive = os.path.splitdrive(file_path)[0]
+    if not drive:
+        return None
+    root = drive + '\\'
+    if os.path.exists(root + 'EFI'):
+        rel = os.path.relpath(file_path, root)
+        rel = rel.replace('/', '\\')
+        if not rel.startswith('\\'):
+            rel = '\\' + rel
+        return rel
+    return None
+
 class NVRAMApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("NVRAM Manager (UEFI)")
+        self.root.title("NVRAM Manager (UEFI) - Made by DragonNew17 :-D")
         self.root.geometry("1500x750")
 
         style = ttk.Style()
@@ -441,9 +556,9 @@ class NVRAMApp:
 
         columns = ("name", "hex_value", "description", "file_path")
         self.tree = ttk.Treeview(main_frame, columns=columns, show="headings")
-        self.tree.heading("name", text="Имя")
-        self.tree.heading("hex_value", text="Значение (hex)")
-        self.tree.heading("description", text="Описание")
+        self.tree.heading("name", text="Name")
+        self.tree.heading("hex_value", text="Value (hex)")
+        self.tree.heading("description", text="Description")
         self.tree.heading("file_path", text="Device Path")
 
         self.tree.column("name", width=100, anchor="w", stretch=False)
@@ -467,13 +582,15 @@ class NVRAMApp:
         control_frame = ttk.Frame(root)
         control_frame.pack(pady=5, fill=tk.X)
 
-        ttk.Button(control_frame, text="Обновить список", command=self.refresh).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Удалить выбранные", command=self.delete_selected_entries).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Редактировать описание", command=self.edit_description_selected).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Изменить порядок загрузки", command=self.edit_boot_order).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Восстановить загрузчик", command=self.restore_boot).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Refresh", command=self.refresh).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Delete Selected", command=self.delete_selected_entries).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Edit Description", command=self.edit_description_selected).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Change Boot Order", command=self.edit_boot_order).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Restore Bootloader", command=self.restore_boot).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Add Entry", command=self.add_boot_entry).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Edit Path", command=self.edit_boot_path).pack(side=tk.LEFT, padx=5)
 
-        self.status = ttk.Label(root, text="Готово", relief=tk.SUNKEN, anchor=tk.W)
+        self.status = ttk.Label(root, text="Ready - Made by DragonNew17 :-D", relief=tk.SUNKEN, anchor=tk.W)
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
         self.status.configure(background='#3a3a3a', foreground='white')
 
@@ -488,24 +605,28 @@ class NVRAMApp:
         vars_list = get_all_variables()
         for name, hex_val, desc, fpath in vars_list:
             self.tree.insert("", tk.END, values=(name, hex_val, desc, fpath))
-        self.set_status(f"Загружено переменных: {len(vars_list)}")
+        self.set_status(f"Loaded {len(vars_list)} variables.")
 
     def show_context_menu(self, event):
         item = self.tree.identify_row(event.y)
         if item:
             self.tree.selection_set(item)
         menu = tk.Menu(self.root, tearoff=0, bg='#3a3a3a', fg='white')
-        menu.add_command(label="Удалить выбранные записи", command=self.delete_selected_entries)
-        menu.add_command(label="Редактировать описание", command=self.edit_description_selected)
+        menu.add_command(label="Delete Selected", command=self.delete_selected_entries)
+        menu.add_command(label="Edit Description", command=self.edit_description_selected)
         menu.add_separator()
-        menu.add_command(label="Изменить порядок загрузки", command=self.edit_boot_order)
-        menu.add_command(label="Обновить список", command=self.refresh)
+        menu.add_command(label="Edit Path", command=self.edit_boot_path)
+        menu.add_separator()
+        menu.add_command(label="Add Entry", command=self.add_boot_entry)
+        menu.add_separator()
+        menu.add_command(label="Change Boot Order", command=self.edit_boot_order)
+        menu.add_command(label="Refresh", command=self.refresh)
         menu.post(event.x_root, event.y_root)
 
     def delete_selected_entries(self):
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("Нет выбора", "Выберите хотя бы одну запись.")
+            messagebox.showwarning("No selection", "Please select at least one entry.")
             return
         names = []
         for item in selected:
@@ -513,9 +634,9 @@ class NVRAMApp:
             if name.startswith("Boot") and len(name) == 8 and name[4:].isalnum():
                 names.append(name)
         if not names:
-            messagebox.showwarning("Нет загрузочных записей", "Среди выбранных нет BootXXXX.")
+            messagebox.showwarning("No boot entries", "Selected items do not include BootXXXX entries.")
             return
-        if not messagebox.askyesno("Подтверждение", f"Удалить {len(names)} записей?"):
+        if not messagebox.askyesno("Confirm", f"Delete {len(names)} entries?"):
             return
         errors = []
         for name in names:
@@ -523,45 +644,44 @@ class NVRAMApp:
             if not success:
                 errors.append(f"{name}: {err}")
         if errors:
-            self.set_status(f"Ошибки: {', '.join(errors)}", True)
-            messagebox.showerror("Ошибки", "Не все записи удалены:\n" + "\n".join(errors))
+            self.set_status(f"Errors: {', '.join(errors)}", True)
+            messagebox.showerror("Errors", "Not all entries were deleted:\n" + "\n".join(errors))
         else:
-            self.set_status(f"Удалено {len(names)} записей")
-            messagebox.showinfo("Успех", f"Удалено {len(names)} записей.")
+            self.set_status(f"Deleted {len(names)} entries.")
+            messagebox.showinfo("Success", f"Deleted {len(names)} entries.")
         self.refresh()
 
     def edit_description_selected(self):
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("Нет выбора", "Выберите запись.")
+            messagebox.showwarning("No selection", "Please select an entry.")
             return
         item = selected[0]
         name = self.tree.item(item, 'values')[0]
         if not (name.startswith("Boot") and len(name) == 8 and name[4:].isalnum()):
-            messagebox.showerror("Неверная запись", "Можно редактировать только BootXXXX.")
+            messagebox.showerror("Invalid entry", "Only BootXXXX entries can be edited.")
             return
         current_desc = self.tree.item(item, 'values')[2]
-        new_desc = simpledialog.askstring("Редактирование описания",
-                                          f"Новое описание для {name}:",
+        new_desc = simpledialog.askstring("Edit Description",
+                                          f"New description for {name}:",
                                           initialvalue=current_desc)
         if new_desc is None:
             return
         if not new_desc.strip():
-            messagebox.showwarning("Пустое описание", "Описание не может быть пустым.")
+            messagebox.showwarning("Empty description", "Description cannot be empty.")
             return
         success, err = update_boot_description(name, new_desc.strip())
         if success:
-            self.set_status(f"Описание {name} обновлено.")
+            self.set_status(f"Description for {name} updated.")
             self.refresh()
         else:
-            self.set_status(f"Ошибка: {err}", True)
-            messagebox.showerror("Ошибка", f"Не удалось обновить описание. Код: {err}")
+            self.set_status(f"Error: {err}", True)
+            messagebox.showerror("Error", f"Failed to update description. Code: {err}")
 
     def edit_boot_order(self):
-        EFI_GLOBAL_GUID = "{8be4df61-93ca-11d2-aa0d-00e098032b8c}"
         data, err = read_uefi_var("BootOrder", EFI_GLOBAL_GUID)
         if data is None:
-            messagebox.showerror("Ошибка", "Не удалось прочитать BootOrder.")
+            messagebox.showerror("Error", "Failed to read BootOrder.")
             return
         current_order = []
         for i in range(0, len(data), 2):
@@ -575,7 +695,7 @@ class NVRAMApp:
                 all_boots.append(name)
 
         order_window = tk.Toplevel(self.root)
-        order_window.title("Порядок загрузки")
+        order_window.title("Boot Order")
         order_window.geometry("400x500")
         order_window.configure(bg='#2d2d2d')
 
@@ -606,44 +726,206 @@ class NVRAMApp:
                 listbox.insert(idx[0]+1, item)
                 listbox.selection_set(idx[0]+1)
 
-        ttk.Button(btn_frame, text="↑ Вверх", command=move_up).pack(pady=5)
-        ttk.Button(btn_frame, text="↓ Вниз", command=move_down).pack(pady=5)
+        ttk.Button(btn_frame, text="↑ Up", command=move_up).pack(pady=5)
+        ttk.Button(btn_frame, text="↓ Down", command=move_down).pack(pady=5)
 
         def apply_order():
             new_order = listbox.get(0, tk.END)
             if not new_order:
-                messagebox.showwarning("Пустой порядок", "Список не должен быть пустым.")
+                messagebox.showwarning("Empty order", "Boot order list cannot be empty.")
                 return
             success, err = update_boot_order(new_order)
             if success:
-                messagebox.showinfo("Успех", "Порядок загрузки обновлён.")
+                messagebox.showinfo("Success", "Boot order updated.")
                 order_window.destroy()
                 self.refresh()
             else:
-                messagebox.showerror("Ошибка", f"Не удалось обновить BootOrder. Код: {err}")
+                messagebox.showerror("Error", f"Failed to update BootOrder. Code: {err}")
 
-        ttk.Button(order_window, text="Применить", command=apply_order).pack(pady=10)
+        ttk.Button(order_window, text="Apply", command=apply_order).pack(pady=10)
 
     def restore_boot(self):
-        if not messagebox.askyesno("Подтверждение",
-                                   "Заменить bootmgfw.efi и bootx64.efi на встроенные?"):
+        if not messagebox.askyesno("Confirm",
+                                   "Replace bootmgfw.efi and bootx64.efi with embedded files?"):
             return
-        self.set_status("Восстановление...")
+        self.set_status("Restoring...")
         self.root.update()
         result = restore_boot_files()
-        if "успешно" in result.lower() or "заменены" in result.lower():
+        if "success" in result.lower() or "replaced" in result.lower():
             self.set_status(result)
-            messagebox.showinfo("Результат", result)
+            messagebox.showinfo("Result", result)
             self.refresh()
         else:
             self.set_status(result, True)
-            messagebox.showwarning("Внимание", result)
+            messagebox.showwarning("Attention", result)
+
+    def add_boot_entry(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Add Boot Entry")
+        dialog.geometry("700x380")
+        dialog.configure(bg='#2d2d2d')
+
+        ttk.Label(dialog, text="Description:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        desc_entry = ttk.Entry(dialog, width=60)
+        desc_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(dialog, text="Device Path (hex):").grid(row=1, column=0, padx=5, pady=5, sticky="ne")
+        path_entry = ttk.Entry(dialog, width=80)
+        path_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        def pick_file_and_encode():
+            file_path = filedialog.askopenfilename(title="Select EFI file (e.g., bootmgfw.efi)")
+            if not file_path:
+                return
+            rel = get_relative_efi_path(file_path)
+            if rel:
+                hex_path = path_to_utf16le_hex(rel)
+                path_entry.delete(0, tk.END)
+                path_entry.insert(0, hex_path)
+                messagebox.showinfo("Success", f"Relative path {rel} converted to HEX.")
+            else:
+                hex_path = path_to_utf16le_hex(file_path)
+                path_entry.delete(0, tk.END)
+                path_entry.insert(0, hex_path)
+                messagebox.showwarning("Attention",
+                                       "Selected file is not on an EFI partition (no EFI folder in root).\n"
+                                       "Full path encoded, but a full Device Path is required for boot.\n"
+                                       "It is recommended to copy the device prefix from an existing entry.")
+        ttk.Button(dialog, text="Select file and encode path", command=pick_file_and_encode).grid(row=2, column=0, columnspan=2, pady=5)
+
+        def paste_from_selected():
+            sel = self.tree.selection()
+            if sel:
+                item = sel[0]
+                name = self.tree.item(item, 'values')[0]
+                if name.startswith("Boot") and len(name) == 8:
+                    data, _ = read_uefi_var(name, EFI_GLOBAL_GUID)
+                    if data:
+                        hex_path = extract_file_path_hex(data)
+                        if hex_path:
+                            path_entry.delete(0, tk.END)
+                            path_entry.insert(0, hex_path)
+                            return
+            messagebox.showwarning("No suitable entry", "Select a BootXXXX entry in the main list to copy its path.")
+        ttk.Button(dialog, text="Copy path from selected entry", command=paste_from_selected).grid(row=3, column=0, columnspan=2, pady=5)
+
+        def on_create():
+            desc = desc_entry.get().strip()
+            if not desc:
+                messagebox.showwarning("Empty description", "Please enter a description.")
+                return
+            hex_path = path_entry.get().strip().replace(" ", "").replace("\t", "")
+            if not hex_path:
+                messagebox.showwarning("Empty path", "Please enter a hex path.")
+                return
+            try:
+                bytes.fromhex(hex_path)
+            except ValueError:
+                messagebox.showerror("Error", "Invalid hex format (only hex digits allowed).")
+                return
+
+            success, result = create_boot_entry(desc, hex_path)
+            if success:
+                boot_name = result[0]
+                self.set_status(f"Entry {boot_name} created.")
+                if messagebox.askyesno("Add to BootOrder", f"Add {boot_name} to boot order (at the end)?"):
+                    ok, err = add_to_boot_order(boot_name)
+                    if ok:
+                        self.set_status(f"{boot_name} added to BootOrder.")
+                    else:
+                        self.set_status(f"Failed to add to BootOrder: {err}", True)
+                dialog.destroy()
+                self.refresh()
+            else:
+                messagebox.showerror("Error", f"Failed to create entry: {result}")
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=4, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="Create", command=on_create).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+
+    def edit_boot_path(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("No selection", "Please select an entry.")
+            return
+        item = selected[0]
+        name = self.tree.item(item, 'values')[0]
+        if not (name.startswith("Boot") and len(name) == 8 and name[4:].isalnum()):
+            messagebox.showerror("Invalid entry", "Only BootXXXX entries can be edited.")
+            return
+
+        data, err = read_uefi_var(name, EFI_GLOBAL_GUID)
+        if data is None:
+            messagebox.showerror("Error", f"Failed to read {name}: {err}")
+            return
+        current_hex_path = extract_file_path_hex(data)
+        if current_hex_path is None:
+            messagebox.showerror("Error", "Could not extract path from entry.")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Edit Path for {name}")
+        dialog.geometry("700x320")
+        dialog.configure(bg='#2d2d2d')
+
+        ttk.Label(dialog, text="Current path (hex):").grid(row=0, column=0, padx=5, pady=5, sticky="ne")
+        path_display = tk.Text(dialog, height=3, width=80, bg='#3a3a3a', fg='white', wrap=tk.NONE)
+        path_display.grid(row=0, column=1, padx=5, pady=5)
+        path_display.insert(tk.END, current_hex_path)
+        path_display.config(state=tk.DISABLED)
+
+        ttk.Label(dialog, text="New path (hex):").grid(row=1, column=0, padx=5, pady=5, sticky="ne")
+        new_path_entry = ttk.Entry(dialog, width=80)
+        new_path_entry.grid(row=1, column=1, padx=5, pady=5)
+        new_path_entry.insert(0, current_hex_path)
+
+        def pick_file_and_encode_edit():
+            file_path = filedialog.askopenfilename(title="Select EFI file")
+            if not file_path:
+                return
+            rel = get_relative_efi_path(file_path)
+            if rel:
+                hex_path = path_to_utf16le_hex(rel)
+                new_path_entry.delete(0, tk.END)
+                new_path_entry.insert(0, hex_path)
+                messagebox.showinfo("Success", f"Relative path {rel} converted to HEX.")
+            else:
+                hex_path = path_to_utf16le_hex(file_path)
+                new_path_entry.delete(0, tk.END)
+                new_path_entry.insert(0, hex_path)
+                messagebox.showwarning("Attention",
+                                       "File not on EFI partition. Full path encoded, but a full Device Path is required for boot.")
+        ttk.Button(dialog, text="Select file and encode path", command=pick_file_and_encode_edit).grid(row=2, column=0, columnspan=2, pady=5)
+
+        def on_update():
+            new_hex = new_path_entry.get().strip().replace(" ", "").replace("\t", "")
+            if not new_hex:
+                messagebox.showwarning("Empty path", "Please enter a hex path.")
+                return
+            try:
+                bytes.fromhex(new_hex)
+            except ValueError:
+                messagebox.showerror("Error", "Invalid hex format.")
+                return
+            success, err = update_boot_path(name, new_hex)
+            if success:
+                self.set_status(f"Path for {name} updated.")
+                dialog.destroy()
+                self.refresh()
+            else:
+                messagebox.showerror("Error", f"Failed to update path: {err}")
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_frame, text="Update", command=on_update).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
 def main():
     if not enable_system_environment_privilege():
         root = tk.Tk()
-        root.title("Ошибка")
-        tk.Label(root, text="Не удалось включить привилегию SeSystemEnvironmentPrivilege.", fg="red").pack(padx=20, pady=20)
+        root.title("Error")
+        tk.Label(root, text="Failed to enable SeSystemEnvironmentPrivilege.", fg="red").pack(padx=20, pady=20)
         root.mainloop()
         return
 
